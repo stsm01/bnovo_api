@@ -88,33 +88,41 @@ def _load_token() -> str | None:
     return None
 
 
-def _load_credentials() -> tuple[int, str]:
-    """Загружает user_id и password из конфига."""
+def _load_cached_user_id() -> int:
+    """Загружает user_id из кэша токена.
+
+    API-ключ/пароль намеренно не читаем и не храним в кэше: это долгоживущий
+    секрет. Для обновления токена ключ должен прийти из аргумента --password
+    или переменной окружения BNOVO_PASSWORD.
+    """
     if CONFIG_FILE.exists():
         try:
             data = json.loads(CONFIG_FILE.read_text())
             uid = data.get("user_id", 0)
-            pwd = data.get("password", "")
-            if uid and pwd:
-                return int(uid), pwd
+            if uid:
+                return int(uid)
         except Exception:
             pass
-    return 0, ""
+    return 0
 
 
-def _save_token(token: str, user_id: int = 0, password: str = ""):
-    """Сохраняет токен и учётные данные в конфиг."""
+def _save_token(token: str, user_id: int = 0):
+    """Сохраняет JWT-токен в кэш.
+
+    Важно: API-ключ/пароль не сохраняется в файл. В кэше допускаются только
+    краткоживущий access_token и несекретный user_id.
+    """
     data = {}
     if CONFIG_FILE.exists():
         try:
             data = json.loads(CONFIG_FILE.read_text())
         except Exception:
             pass
+    # Миграция старого формата: если раньше password был сохранён, удаляем.
+    data.pop("password", None)
     data["access_token"] = token
     if user_id:
         data["user_id"] = user_id
-    if password:
-        data["password"] = password
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
     CONFIG_FILE.chmod(0o600)  # только владелец
 
@@ -123,7 +131,7 @@ def _authenticate(user_id: int, password: str) -> str:
     print("Получаем новый токен...", file=sys.stderr)
     resp = _post("/api/v1/auth", {"id": user_id, "password": password})
     token = resp["data"]["access_token"]
-    _save_token(token, user_id, password)
+    _save_token(token, user_id)
     exp = _jwt_exp(token)
     print(
         f"Токен получен, действует до {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(exp))}",
@@ -264,14 +272,13 @@ def main():
     date_to = args.date_to or today.isoformat()
     date_from = args.date_from or (today - timedelta(days=14)).isoformat()
 
-    # Учётные данные: приоритет — аргументы → переменные окружения → конфиг
+    # Учётные данные: приоритет — аргументы → переменные окружения → кэшированный user_id.
+    # API-ключ/пароль из кэша не читается и не хранится.
     user_id = args.user_id or int(os.environ.get("BNOVO_ID", 0))
     password = args.password or os.environ.get("BNOVO_PASSWORD", "")
 
-    if not user_id or not password:
-        cfg_uid, cfg_pwd = _load_credentials()
-        user_id = user_id or cfg_uid
-        password = password or cfg_pwd
+    if not user_id:
+        user_id = _load_cached_user_id()
 
     if not user_id or not password:
         # Попробуем получить токен из кэша без учётных данных
