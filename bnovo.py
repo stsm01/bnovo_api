@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-Bnovo PMS API — получение бронирований.
+Bnovo PMS API — бронирования, доп. услуги, счета.
 
 Использование:
-    python3 bnovo.py                          # за последние 14 дней
-    python3 bnovo.py --from 2026-03-01        # с даты по сегодня
+    python3 bnovo.py                                # бронирования за последние 14 дней
+    python3 bnovo.py --from 2026-03-01              # с даты по сегодня
     python3 bnovo.py --from 2026-03-01 --to 2026-03-31
-    python3 bnovo.py --type checkmate         # по шахматке
-    python3 bnovo.py --json                   # вывод сырого JSON
+    python3 bnovo.py --type checkmate               # по шахматке
+    python3 bnovo.py --json                         # вывод сырого JSON
+
+    python3 bnovo.py --services                     # каталог доп. услуг отеля
+    python3 bnovo.py --booking-services 397         # доп. услуги конкретного бронирования
+    python3 bnovo.py --booking-invoices 397         # счета конкретного бронирования
 """
 
 import argparse
@@ -195,6 +199,25 @@ def get_bookings(token: str, date_from: str, date_to: str, data_type: str | None
 
     return all_bookings
 
+# ─── Доп. услуги ──────────────────────────────────────────────────────────────
+
+def get_services(token: str) -> list[dict]:
+    """Каталог доп. услуг отеля."""
+    resp = _get("/api/v1/services", {}, token)
+    return resp["data"]["services"]
+
+
+def get_booking_services(token: str, booking_id: int) -> list[dict]:
+    """Доп. услуги конкретного бронирования."""
+    resp = _get(f"/api/v1/bookings/{booking_id}/services", {}, token)
+    return resp["data"]["services"]
+
+
+def get_booking_invoices(token: str, booking_id: int) -> list[dict]:
+    """Счета конкретного бронирования."""
+    resp = _get(f"/api/v1/bookings/{booking_id}/invoices", {}, token)
+    return resp["data"]["invoices"]
+
 # ─── Вывод ────────────────────────────────────────────────────────────────────
 
 def print_report(bookings: list[dict], date_from: str, date_to: str, data_type: str | None):
@@ -255,25 +278,95 @@ def print_report(bookings: list[dict], date_from: str, date_to: str, data_type: 
         )
     print()
 
+def print_services(services: list[dict]):
+    print(f"\n{'═'*70}")
+    print(f"  Каталог доп. услуг  |  всего: {len(services)}")
+    print(f"{'═'*70}\n")
+    if not services:
+        print("Нет доп. услуг.")
+        return
+    print(f"  {'ID':<6} {'Название':<35} {'Цена':>12}  {'Тип цены':<12} {'Категория'}")
+    print(f"  {'─'*80}")
+    for s in services:
+        price = float(s.get("price", 0))
+        price_type = s.get("price_type", "")
+        stype = s.get("type", "")
+        pkg = " [пакет]" if s.get("is_package") else ""
+        print(f"  {s['id']:<6} {s['name']:<35} {price:>12,.2f}  {price_type:<12} {stype}{pkg}")
+    print()
+
+
+def print_booking_services(services: list[dict], booking_id: int):
+    print(f"\n{'═'*70}")
+    print(f"  Доп. услуги брони #{booking_id}  |  позиций: {len(services)}")
+    print(f"{'═'*70}\n")
+    if not services:
+        print("Нет доп. услуг в этой брони.")
+        return
+    for s in services:
+        included = "включена" if s.get("included") else "отдельно"
+        qty_by_date = s.get("quantity", [])
+        price_by_date = s.get("price", [])
+        total = sum(
+            list(d.values())[0]
+            for d in (price_by_date if isinstance(price_by_date, list) else [])
+            if d
+        )
+        print(f"  service_id={s['service_id']}  ({included})  итого: {total:,.0f} ₽")
+        for entry in (qty_by_date if isinstance(qty_by_date, list) else []):
+            for dt, qty in entry.items():
+                price_entry = next(
+                    (list(p.values())[0] for p in price_by_date if isinstance(p, dict) and dt in p),
+                    "—",
+                )
+                print(f"    {dt}  qty={qty}  price={price_entry}")
+    print()
+
+
+def print_booking_invoices(invoices: list[dict], booking_id: int):
+    print(f"\n{'═'*70}")
+    print(f"  Счета брони #{booking_id}  |  всего: {len(invoices)}")
+    print(f"{'═'*70}\n")
+    if not invoices:
+        print("Нет счетов для этой брони.")
+        return
+    for inv in invoices:
+        paid = inv.get("payed_amount", 0)
+        total = inv.get("amount", 0)
+        debt = total - paid
+        status = "оплачен" if debt <= 0 else f"долг {debt:,.0f} ₽"
+        print(
+            f"  Счёт #{inv['number']} (id={inv['id']})"
+            f"  сумма={total:,.0f} ₽  оплачено={paid:,.0f} ₽  [{status}]"
+        )
+        print(f"  Плательщик: {inv.get('payer_name', '—')}  |  {inv.get('create_date', '')}")
+        svcs = inv.get("services", [])
+        if svcs:
+            print(f"  {'Услуга':<55} {'Кол-во':>7} {'Сумма':>10}")
+            print(f"  {'─'*75}")
+            for line in svcs:
+                name = line.get("name", "")[:54]
+                print(f"  {name:<55} {line.get('count', 0):>7} {line.get('amount', 0):>10,.0f}")
+        print()
+
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Bnovo API — получение бронирований")
+    parser = argparse.ArgumentParser(description="Bnovo API — бронирования, доп. услуги, счета")
     parser.add_argument("--from", dest="date_from", help="Дата начала (YYYY-MM-DD), по умолчанию -14 дней")
     parser.add_argument("--to", dest="date_to", help="Дата конца (YYYY-MM-DD), по умолчанию сегодня")
     parser.add_argument("--type", dest="data_type", choices=list(filter(None, DATA_TYPES)), help="Тип выборки")
     parser.add_argument("--json", dest="raw_json", action="store_true", help="Вывести сырой JSON")
     parser.add_argument("--id", dest="user_id", type=int, help="ID пользователя API")
     parser.add_argument("--password", dest="password", help="API ключ")
+    parser.add_argument("--services", action="store_true", help="Каталог доп. услуг отеля")
+    parser.add_argument("--booking-services", dest="booking_services_id", type=int, metavar="BOOKING_ID",
+                        help="Доп. услуги конкретного бронирования")
+    parser.add_argument("--booking-invoices", dest="booking_invoices_id", type=int, metavar="BOOKING_ID",
+                        help="Счета конкретного бронирования")
     args = parser.parse_args()
 
-    # Даты
-    today = date.today()
-    date_to = args.date_to or today.isoformat()
-    date_from = args.date_from or (today - timedelta(days=14)).isoformat()
-
     # Учётные данные: приоритет — аргументы → переменные окружения → кэшированный user_id.
-    # API-ключ/пароль из кэша не читается и не хранится.
     user_id = args.user_id or int(os.environ.get("BNOVO_ID", 0))
     password = args.password or os.environ.get("BNOVO_PASSWORD", "")
 
@@ -281,7 +374,6 @@ def main():
         user_id = _load_cached_user_id()
 
     if not user_id or not password:
-        # Попробуем получить токен из кэша без учётных данных
         token = _load_token()
         if not token:
             print(
@@ -293,16 +385,50 @@ def main():
     else:
         token = get_token(user_id, password)
 
-    # Запрос с автоматическим обновлением токена при 401
-    try:
-        bookings = get_bookings(token, date_from, date_to, args.data_type)
-    except RuntimeError as e:
-        if "401" in str(e) and user_id and password:
-            print("Токен отклонён (401), обновляем...", file=sys.stderr)
-            token = _authenticate(user_id, password)
-            bookings = get_bookings(token, date_from, date_to, args.data_type)
-        else:
+    def with_401_retry(fn, *a, **kw):
+        try:
+            return fn(*a, **kw)
+        except RuntimeError as e:
+            if "401" in str(e) and user_id and password:
+                print("Токен отклонён (401), обновляем...", file=sys.stderr)
+                nonlocal token
+                token = _authenticate(user_id, password)
+                return fn(*a, **kw)
             raise
+
+    # ── Доп. услуги каталог ──────────────────────────────────────────────────
+    if args.services:
+        services = with_401_retry(get_services, token)
+        if args.raw_json:
+            print(json.dumps(services, ensure_ascii=False, indent=2))
+        else:
+            print_services(services)
+        return
+
+    # ── Доп. услуги по брони ─────────────────────────────────────────────────
+    if args.booking_services_id is not None:
+        svcs = with_401_retry(get_booking_services, token, args.booking_services_id)
+        if args.raw_json:
+            print(json.dumps(svcs, ensure_ascii=False, indent=2))
+        else:
+            print_booking_services(svcs, args.booking_services_id)
+        return
+
+    # ── Счета по брони ───────────────────────────────────────────────────────
+    if args.booking_invoices_id is not None:
+        invoices = with_401_retry(get_booking_invoices, token, args.booking_invoices_id)
+        if args.raw_json:
+            print(json.dumps(invoices, ensure_ascii=False, indent=2))
+        else:
+            print_booking_invoices(invoices, args.booking_invoices_id)
+        return
+
+    # ── Бронирования (по умолчанию) ──────────────────────────────────────────
+    today = date.today()
+    date_to = args.date_to or today.isoformat()
+    date_from = args.date_from or (today - timedelta(days=14)).isoformat()
+
+    bookings = with_401_retry(get_bookings, token, date_from, date_to, args.data_type)
 
     if args.raw_json:
         print(json.dumps(bookings, ensure_ascii=False, indent=2))
